@@ -1,11 +1,14 @@
 import json
 import ipaddress
+import io
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
 from netmap import cli
+from netmap.compare import changed_macs
 
 
 class HtmlOutputTests(unittest.TestCase):
@@ -94,6 +97,57 @@ class CliTests(unittest.TestCase):
         self.assertEqual([item["ip"] for item in devices], ["192.168.1.1", "192.168.1.2"])
         self.assertEqual(devices[0]["role"], "gateway")
         self.assertEqual(devices[1]["mac"], "aa:bb:cc:dd:ee:ff")
+
+
+class CompareTests(unittest.TestCase):
+    def write_report(self, directory, name, network, devices):
+        path = Path(directory) / name
+        path.write_text(json.dumps({"network": network, "devices": devices}))
+        return str(path)
+
+    def test_compare_flags_changed_mac_without_scanning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old = self.write_report(directory, "old.json", "192.168.1.0/24", [
+                {"ip": "192.168.1.1", "mac": "AA:BB:CC:DD:EE:01"},
+                {"ip": "192.168.1.2", "mac": None},
+                {"ip": "192.168.1.3", "mac": "aa:bb:cc:dd:ee:03"},
+            ])
+            new = self.write_report(directory, "new.json", "192.168.1.0/24", [
+                {"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:02"},
+                {"ip": "192.168.1.2", "mac": "aa:bb:cc:dd:ee:22"},
+                {"ip": "192.168.1.3", "mac": "AA:BB:CC:DD:EE:03"},
+            ])
+            output = io.StringIO()
+            with patch.object(cli, "scan") as scan, redirect_stdout(output):
+                result = cli.main(["--compare", old, new])
+        self.assertEqual(result, 0)
+        self.assertIn("192.168.1.1: MAC changed", output.getvalue())
+        self.assertNotIn("192.168.1.2", output.getvalue())
+        self.assertNotIn("192.168.1.3", output.getvalue())
+        scan.assert_not_called()
+
+    def test_compare_rejects_different_networks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old = self.write_report(directory, "old.json", "192.168.1.0/24", [])
+            new = self.write_report(directory, "new.json", "192.168.2.0/24", [])
+            with self.assertRaisesRegex(ValueError, "different networks"):
+                changed_macs(old, new)
+
+    def test_compare_rejects_duplicate_ips(self):
+        with tempfile.TemporaryDirectory() as directory:
+            old = self.write_report(directory, "old.json", "192.168.1.0/24", [
+                {"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:01"},
+                {"ip": "192.168.1.1", "mac": "aa:bb:cc:dd:ee:02"},
+            ])
+            new = self.write_report(directory, "new.json", "192.168.1.0/24", [])
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                changed_macs(old, new)
+
+    def test_missing_report_explains_how_to_create_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = str(Path(directory) / "before.json")
+            with self.assertRaisesRegex(ValueError, "Run a scan with --json"):
+                changed_macs(missing, missing)
 
 
 if __name__ == "__main__":

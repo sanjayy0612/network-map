@@ -163,7 +163,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", dest="json_path", default="network-map.json", help="JSON output path")
     parser.add_argument("--html", dest="html_path", default="network-map.html", help="HTML output path")
     parser.add_argument("--tui", action="store_true", help="open the interactive terminal interface")
+    parser.add_argument("--compare", nargs=2, metavar=("OLD_JSON", "NEW_JSON"),
+                        help="compare saved reports for changed IP-to-MAC mappings; does not scan")
     args = parser.parse_args(argv)
+    if args.compare:
+        from .compare import changed_macs
+        try:
+            changes = changed_macs(*args.compare)
+        except (OSError, ValueError) as exc:
+            print(f"netmap: {exc}", file=sys.stderr)
+            return 2
+        if not changes:
+            print("No IP-to-MAC changes found in devices with known MAC addresses.")
+        for ip, old_mac, new_mac in changes:
+            print(f"{ip}: MAC changed from {old_mac} to {new_mac} (check this change)")
+        return 0
     system = platform.system()
     required = {"Linux": ("ip", "ping"), "Darwin": ("netstat", "route", "ifconfig", "arp", "ping")}.get(system)
     if required is None:
